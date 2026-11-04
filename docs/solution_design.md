@@ -1,45 +1,50 @@
 # Solution design — Kudos API
 
 ## Architecture overview
-A single Node 22 / TypeScript process using `node:http` only, JSON-file storage (`data/kudos.json`, array of kudos), config from the environment, and `node:test`. No auth, no integrations. The repo currently holds only docs; the scaffold story creates `src/`, the checks and the store.
+Single Node 22 process, TypeScript (ESM, NodeNext), `node:http` only, no runtime dependencies. JSON array in a file as storage. Request flow: `server.ts` → `createApp` (router, error handling) → route handler (feature module) → store.
 
-## Module map (FT-103 view; scaffold names assumed)
-| Path | Responsibility | Story |
+## Module map
+| Module | Responsibility | Story |
 |---|---|---|
-| src/app.ts | Server and router; one line calls `registerKudosRoutes` | scaffold |
-| src/errors.ts | `HttpError(status, message, field?)` → `{error, field}` JSON | scaffold |
-| src/store.ts | Read all, serialised add / remove writes to the JSON file | scaffold |
-| src/kudos.ts | POST, GET and DELETE `/kudos` handlers and validation | US-108, US-109, US-110 |
-| src/paging.ts | `parsePaging` | US-109 |
-| test/kudos-*.test.ts | One file per story | all |
+| package.json, tsconfig*.json, eslint.config.js | Scripts typecheck/lint/test/build/start | US-105 |
+| src/version.ts | `VERSION` constant (used by /health) | US-105 |
+| src/config.ts | `loadConfig(env)` → port, dataFile | US-106 |
+| src/store.ts | `Kudos` type, `createStore(file)`: list/add/remove, serialised atomic writes | US-106 |
+| src/errors.ts | `HttpError`, `sendJson`, `readJsonBody` | US-107 |
+| src/app.ts | `createApp({store, clock})`, 404/405/500 handling | US-107 |
+| src/routes.ts | `buildRoutes(deps)`: one line per feature module | US-107 |
+| src/server.ts | Entry point | US-107 |
+| src/<feature>.ts | Feature routes (kudos, summary, health), added by later stories | later |
 
 ## Data model
-Kudos: `id` string UUID; `from`, `to` string 1–40 (trimmed); `message` string 1–280 (trimmed); `createdAt` ISO 8601 UTC.
+`Kudos {id: UUID string, from, to (1–40, differ), message (1–280), createdAt ISO 8601}`, stored as an array in `data/kudos.json` (git-ignored). Missing file = empty list; corrupt file = error, never overwritten.
 
 ## API inventory
-| Route | Success | Errors |
-|---|---|---|
-| POST /kudos | 201 kudos | 400 `{error, field}` (from, to, message, body) |
-| GET /kudos?to&limit&offset | 200 `{items, total, limit, offset}` | 400 field `limit` or `offset` |
-| DELETE /kudos/:id (header `X-Requester`) | 204 | 404 `id`; 400 `requester`; 403 `requester` (not the giver); 403 `id` (window passed) |
-| GET /summary, GET /health | covered by other features | |
-
-DELETE check order: 404 → 400 → 403 requester → 403 window.
+| Route | Notes |
+|---|---|
+| POST /kudos, GET /kudos, DELETE /kudos/:id, GET /summary, GET /health | Features, later stories |
+Error shape: `{error, field?}`. 400 bad input, 403 forbidden, 404 unknown id/route, 405 wrong method, 413 body > 10 KB, 500 generic.
+DELETE order: 404 → 400 (`X-Requester` missing/empty, field `requester`) → 403 not giver (field `requester`, case/trim-insensitive) → 403 window passed (field `id`).
 
 ## Security model
-No sign-in. The requester is a self-declared header, so it is a guard against mistakes, not real authorisation. Input is validated at the boundary, with a body size limit, and bad input never returns 500.
+Anonymous, no sign-in. Requester identity is a self-declared header (`X-Requester`), not authentication. Input validated at the boundary; body cap 10 KB; 500s expose no internals.
 
 ## Integrations
 None.
 
 ## Key decisions
-- Keep all three kudos handlers in one `src/kudos.ts` · lean, under about 300 lines · separate files per route.
-- Injected clock and id generator · deterministic tests of the 10-minute window.
-- Requester in `X-Requester` header, case/space-insensitive; window expiry is 403 with field `id` · product owner #179, #180.
-- Rejected requests validate fully before any store write · no side effects.
+| Decision | Reason | Alternatives |
+|---|---|---|
+| `tsx` for tests, `tsc` for build | Runs TS tests without a build step | Node type stripping (less tooling for NodeNext `.js` imports) |
+| Features register routes via `routes.ts` array | Parallel stories touch only one line in a shared file | Inline routes in app.ts (merge conflicts) |
+| Promise-chain mutex + temp-file/rename | Meets serialised, atomic writes in-process | File lock library (extra dependency, out of scope) |
+| Store doesn't validate or generate ids | Keeps the store simple; handlers own rules | Validation in store |
+| Clock injected into app | Deterministic 10-minute window and weekly tests | Fake timers |
 
 ## Risks
-- The scaffold's names and router shape are not yet known (medium, low): specs say to use the scaffold's names; developers should read the scaffold first.
-- Stories share `src/kudos.ts`, so parallel branches may conflict (medium, low): the first one creates it with `registerKudosRoutes`; the others append handlers.
-- The requester is not authenticated (certain, accepted): out of scope.
-- Concurrent writes to the file (low, medium): all writes go through the serialised store.
+| Risk | L | I | Mitigation |
+|---|---|---|---|
+| Whole-file rewrite per write slows with large data | Low | Low | Small team volumes; database out of scope |
+| Multiple processes corrupt/lose writes | Low | Med | Documented: single process only |
+| Identity header is spoofable | High | Low | Accepted per PO (#179) |
+| No checks until US-105 lands | Med | Med | US-105 is first in order |
